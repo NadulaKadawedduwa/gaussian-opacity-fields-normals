@@ -5,9 +5,9 @@ import GPUtil
 from concurrent.futures import ThreadPoolExecutor
 import time
 
-scenes = ["bicycle", "bonsai", "counter", "flowers", "garden", "stump", "treehill", "kitchen", "room"]
+scenes = ["bicycle"]
 
-factors = [4, 2, 2, 4, 4, 4, 4, 2, 2]
+factors = [4]
 
 excluded_gpus = set([])
 
