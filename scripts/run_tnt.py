@@ -4,10 +4,7 @@ import GPUtil
 from concurrent.futures import ThreadPoolExecutor
 import time
 
-training_list = [
-        'Barn', 'Caterpillar', 'Courthouse', 'Ignatius',
-        'Meetingroom', 'Truck'
-]
+training_list = ['Barn']
 
 split = "TrainingSet"
 scenes = training_list
