@@ -14,21 +14,35 @@ from tetranerf.utils.extension import cpp
 from utils.tetmesh import marching_tetrahedra
 
 @torch.no_grad()
-def evaluage_alpha(points, views, gaussians, pipeline, background, kernel_size, return_color=False):
-    final_alpha = torch.ones((points.shape[0]), dtype=torch.float32, device="cuda")
+def evaluage_alpha(points, views, gaussians, pipeline, background, kernel_size, return_color=False, chunk_size=50_000):
+    N = points.shape[0]
+    final_alpha = torch.ones((N,), dtype=torch.float32, device="cuda")
     if return_color:
-        final_color = torch.ones((points.shape[0], 3), dtype=torch.float32, device="cuda")
-    
+        final_color = torch.ones((N, 3), dtype=torch.float32, device="cuda")
     with torch.no_grad():
-        for _, view in enumerate(tqdm(views, desc="Rendering progress")):
-            ret = integrate(points, view, gaussians, pipeline, background, kernel_size=kernel_size)
-            alpha_integrated = ret["alpha_integrated"]
-            if return_color:
-                color_integrated = ret["color_integrated"]    
-                final_color = torch.where((alpha_integrated < final_alpha).reshape(-1, 1), color_integrated, final_color)
-            final_alpha = torch.min(final_alpha, alpha_integrated)
+        for view in tqdm(views, desc="Rendering progress"):
+            for start in range(0, N, chunk_size):
+                # TODO: stard and end seem to overlap in some cases why
+                end = min(start + chunk_size, N)
+                pts_chunk = points[start:end]
+    
+                ret = integrate(pts_chunk, view, gaussians, pipeline, background, kernel_size=kernel_size)
+                alpha_chunk = ret["alpha_integrated"]
+    
+                prev_alpha = final_alpha[start:end]
+                new_alpha = torch.min(prev_alpha, alpha_chunk)
+                final_alpha[start:end] = new_alpha
+    
+                if return_color:
+                    color_chunk = ret["color_integrated"]
+                    mask = (alpha_chunk < prev_alpha).unsqueeze(-1)
+                    final_color[start:end] = torch.where(
+                        mask, color_chunk, final_color[start:end]
+                    )
+            torch.cuda.empty_cache()
             
         alpha = 1 - final_alpha
+        
     if return_color:
         return alpha, final_color
     return alpha
