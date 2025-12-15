@@ -707,8 +707,8 @@ class GaussianModel:
         return clone - before, split - clone, split - prune
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter, weight_map):
-        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+        self.xyz_gradient_accum[update_filter] += weight_map[update_filter] * torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         #TODO maybe use max instead of average
-        self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True)
-        self.xyz_gradient_accum_abs_max[update_filter] = torch.max(self.xyz_gradient_accum_abs_max[update_filter], torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True))
+        self.xyz_gradient_accum_abs[update_filter] += weight_map[update_filter] * torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True)
+        self.xyz_gradient_accum_abs_max[update_filter] = weight_map[update_filter] * torch.max(self.xyz_gradient_accum_abs_max[update_filter], torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True))
         self.denom[update_filter] += 1
