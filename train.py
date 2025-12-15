@@ -261,6 +261,35 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+
+            # I dont know of a faster way to do this
+            # myabe do initial computations in pixel space by rasterizing?
+            with torch.no_grad():
+                xyz = gaussians.get_xyz
+                R = torch.tensor(viewpoint_cam.R, device=xyz.device, dtype=torch.float32)
+                T = torch.tensor(viewpoint_cam.T, device=xyz.device, dtype=torch.float32)
+        
+                xyz_cam = xyz @ R + T[None, :]
+                x, y, z = xyz_cam[:, 0], xyz_cam[:, 1], xyz_cam[:, 2]
+                z = torch.clamp(z, min=1e-6)
+        
+                fx = viewpoint_cam.focal_x
+                fy = viewpoint_cam.focal_y
+                cx = viewpoint_cam.image_width / 2.0
+                cy = viewpoint_cam.image_height / 2.0
+        
+                u = x / z * fx + cx
+                v = y / z * fy + cy
+        
+                H, W = gt_image.shape[1], gt_image.shape[2]
+                u_int = u.round().long().clamp(0, W - 1)
+                v_int = v.round().long().clamp(0, H - 1)
+        
+                tex = texture_weight[0]
+        
+                # per-point weights sampled at projected pixels
+                per_point_weight = tex[v_int, u_int]
+                
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, weight_map=texture_weight)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
