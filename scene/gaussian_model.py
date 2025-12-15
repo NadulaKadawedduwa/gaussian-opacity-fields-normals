@@ -630,18 +630,20 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_split(self, grads, grad_threshold,  grads_abs, grad_abs_threshold, scene_extent, N=2):
+    def densify_and_split(self, grads, strong_mask, grads_abs, grad_abs_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
-        # Extract points that satisfy the gradient condition
-        padded_grad = torch.zeros((n_init_points), device="cuda")
-        padded_grad[:grads.shape[0]] = grads.squeeze()
-        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        padded_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+        padded_mask[:strong_mask.shape[0]] = strong_mask
+    
         padded_grad_abs = torch.zeros((n_init_points), device="cuda")
         padded_grad_abs[:grads_abs.shape[0]] = grads_abs.squeeze()
-        selected_pts_mask_abs = torch.where(padded_grad_abs >= grad_abs_threshold, True, False)
-        selected_pts_mask = torch.logical_or(selected_pts_mask, selected_pts_mask_abs)
-        selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        selected_pts_mask_abs = padded_grad_abs >= grad_abs_threshold
+    
+        selected_pts_mask = torch.logical_or(padded_mask, selected_pts_mask_abs)
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask,
+            torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent
+        )
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
@@ -658,13 +660,14 @@ class GaussianModel:
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold,  grads_abs, grad_abs_threshold, scene_extent):
-        # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
-        selected_pts_mask_abs = torch.where(torch.norm(grads_abs, dim=-1) >= grad_abs_threshold, True, False)
-        selected_pts_mask = torch.logical_or(selected_pts_mask, selected_pts_mask_abs)
-        selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+    def densify_and_clone(self, grads, strong_mask, grads_abs, grad_abs_threshold, scene_extent):
+        norm_grads_abs = torch.norm(grads_abs, dim=-1)
+        selected_pts_mask_abs = norm_grads_abs >= grad_abs_threshold
+        selected_pts_mask = torch.logical_or(strong_mask, selected_pts_mask_abs)
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask,
+            torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent
+        )
         
         new_xyz = self._xyz[selected_pts_mask]
         # sample a new gaussian instead of fixing position
@@ -688,14 +691,35 @@ class GaussianModel:
         
         grads_abs = self.xyz_gradient_accum_abs / self.denom
         grads_abs[grads_abs.isnan()] = 0.0
-        ratio = (torch.norm(grads, dim=-1) >= max_grad).float().mean()
+    
+        base = max_grad
+        norm_grads = torch.norm(grads, dim=-1)
+        ratio = (norm_grads >= base).float().mean()
         Q = torch.quantile(grads_abs.reshape(-1), 1 - ratio)
-        
+    
+        # Main part that I changesd
+        detail_weight = self.detail_weight_accum / (self.detail_weight_denom + 1e-8)
+        detail_weight[detail_weight.isnan()] = 0.0
+        detail_weight = detail_weight.squeeze(-1) # have to do this otherwise wont commute
+    
+        if detail_weight.numel() > 0:
+            dw = (detail_weight - detail_weight.min()) / (detail_weight.max() - detail_weight.min() + 1e-8)
+        else:
+            dw = detail_weight
+    
+        # mapp [0,1] to better threshold values
+        scale_min, scale_max = 0.5, 2.0
+        scale = scale_min + (scale_max - scale_min) * dw 
+        effective_max_grad = base * scale
+    
+        strong_mask = norm_grads >= effective_max_grad
+
+        # this parts largely the same
         before = self._xyz.shape[0]
-        self.densify_and_clone(grads, max_grad, grads_abs, Q, extent)
+        self.densify_and_clone(grads, strong_mask, grads_abs, Q, extent)
         clone = self._xyz.shape[0]
         
-        self.densify_and_split(grads, max_grad, grads_abs, Q, extent)
+        self.densify_and_split(grads, strong_mask, grads_abs, Q, extent)
         split = self._xyz.shape[0]
         
         prune_mask = (self.get_opacity < min_opacity).squeeze()
@@ -705,7 +729,6 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
         prune = self._xyz.shape[0]
-        # torch.cuda.empty_cache()
         return clone - before, split - clone, split - prune
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter, weight_map):
