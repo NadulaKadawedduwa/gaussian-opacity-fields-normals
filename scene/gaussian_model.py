@@ -362,6 +362,8 @@ class GaussianModel:
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
+        self.detail_weight_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.detail_weight_denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -581,8 +583,6 @@ class GaussianModel:
         self.xyz_gradient_accum_abs_max = self.xyz_gradient_accum_abs_max[valid_points_mask]
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        self.detail_weight_accum = self.detail_weight_accum[valid_points_mask]
-        self.detail_weight_denom = self.detail_weight_denom[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -629,8 +629,6 @@ class GaussianModel:
         self.xyz_gradient_accum_abs_max = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        self.detail_weight_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.detail_weight_denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
     def densify_and_split(self, grads, grad_threshold,  grads_abs, grad_abs_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -711,8 +709,28 @@ class GaussianModel:
         return clone - before, split - clone, split - prune
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter, weight_map):
-        self.xyz_gradient_accum[update_filter] += weight_map[update_filter] * torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
-        #TODO maybe use max instead of average
-        self.xyz_gradient_accum_abs[update_filter] += weight_map[update_filter] * torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True)
-        self.xyz_gradient_accum_abs_max[update_filter] = weight_map[update_filter] * torch.max(self.xyz_gradient_accum_abs_max[update_filter], torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True))
+        grad_xy = torch.norm(viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True)
+    grad_rest = torch.norm(viewspace_point_tensor.grad[update_filter, 2:], dim=-1, keepdim=True)
+
+    if weight_map is not None:
+        # TODO: modify indexing so its same as update_filter
+        w = weight_map[update_filter].unsqueeze(-1)  # [N_sel, 1]
+        grad_xy = grad_xy * w
+        grad_rest = grad_rest * w
+
+        # accumulate per-Gaussian detail weigt
+        self.detail_weight_accum[update_filter] += w
+        self.detail_weight_denom[update_filter] += 1
+        # else: keep old behavior
+    
+        self.xyz_gradient_accum[update_filter] += grad_xy
+        self.xyz_gradient_accum_abs[update_filter] += grad_rest
+        self.xyz_gradient_accum_abs_max[update_filter] = torch.max(
+            self.xyz_gradient_accum_abs_max[update_filter], grad_rest
+        )
         self.denom[update_filter] += 1
+        # self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+        # #TODO maybe use max instead of average
+        # self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True)
+        # self.xyz_gradient_accum_abs_max[update_filter] = torch.max(self.xyz_gradient_accum_abs_max[update_filter], torch.norm(viewspace_point_tensor.grad[update_filter,2:], dim=-1, keepdim=True))
+        # self.denom[update_filter] += 1
