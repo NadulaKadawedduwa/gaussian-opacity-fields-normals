@@ -159,6 +159,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1 = L1_loss_appearance(image, gt_image, gaussians, viewpoint_cam.idx)
         
         rgb_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+
+        gray = gt_image.mean(0, keepdim=True)
+        gx = gray[:, :, 1:] - gray[:, :, :-1]
+        gy = gray[:, 1:, :] - gray[:, :-1, :]
+        # pad stuff
+        gx = torch.nn.functional.pad(gx, (0,1,0,0))
+        gy = torch.nn.functional.pad(gy, (0,0,0,1))
+        texture_weight = (gx.abs() + gy.abs()).clamp(max=1.0)
         
         # depth distortion regularization
         distortion_map = rendering[8, :, :]
@@ -253,7 +261,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, weight_map=texture_weight)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
